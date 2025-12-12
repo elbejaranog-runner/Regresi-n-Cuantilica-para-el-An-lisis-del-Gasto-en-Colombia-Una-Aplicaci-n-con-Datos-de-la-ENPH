@@ -1,0 +1,254 @@
+---
+title: "Regresión Cuantílica"
+format: html
+editor: visual
+---
+Datos tomados, únicamente, de la Encuesta Nacional de Presupuestos de los Hogares (ENPH)
+
+```{r}
+Gastos_diarios_Urbanos_Mercados <- read.csv2("C:\\Users\\stive\\Downloads\\Gastos diarios Urbanos - Mercados\\Gastos diarios Urbanos - Mercados.csv")
+vh <- read.csv2("C:\\Users\\stive\\Downloads\\Viviendas y hogares\\Viviendas y hogares.csv")
+```
+
+
+Objetivos
+
+Estimar cómo varía la elasticidad del gasto en mercado respecto al gasto total del hogar a lo largo de distintos cuantiles.
+
+Comparar los resultados de regresión cuantilica con el modelo OLS para evidenciar heterogeneidad en la relación entre ambas variables.
+
+Contrastar el comportamiento de las elasticidades entre Bogotá y el agregado nacional.
+
+Visualizar las diferencias en las pendientes cuantilicas (q = 0.10, 0.50, 0.90) para interpretar patrones de consumo entre hogares.
+
+
+```{r}
+library(dplyr)
+library(quantreg)
+
+# --- 1. Limpieza en gastos diarios (Mercados) ---
+gd <- Gastos_diarios_Urbanos_Mercados
+
+gd <- gd %>%
+  mutate(
+    gasto_diario = case_when(
+      NC2_CC_P4   >= 100 ~ NC2_CC_P4,
+      NC2_CC_P4S1 >= 100 ~ NC2_CC_P4S1,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(gasto_diario)) %>%
+  mutate(gasto_mercado_mensual = gasto_diario * 30)
+
+# Agrupamos gasto mensual por hogar
+gd_hogar <- gd %>%
+  group_by(DIRECTORIO) %>%
+  summarise(
+    gasto_mercado_mensual = sum(gasto_mercado_mensual, na.rm = TRUE)
+  )
+
+
+# --- 2. Limpieza de gasto total en vh (GCUG) ---
+vh2 <- vh %>%
+  mutate(GCUG = as.numeric(gsub(",", ".", GCUG))) %>% 
+  filter(GCUG > 0) %>%
+  select(DIRECTORIO, DOMINIO, GCUG)
+
+
+# --- 3. Unión para TODO COLOMBIA ---
+data_colombia <- vh2 %>%
+  inner_join(gd_hogar, by = "DIRECTORIO") %>%
+  filter(gasto_mercado_mensual > 0) %>%
+  mutate(
+    log_total   = log(GCUG),
+    log_mercado = log(gasto_mercado_mensual)
+  )
+
+```
+
+
+```{r}
+summary(data_colombia$GCUG)
+summary(data_colombia$gasto_mercado_mensual)
+dim(data_colombia)
+unique(data_colombia$DOMINIO)[1:20]
+
+```
+
+
+```{r}
+ols_col <- lm(log_mercado ~ log_total, data = data_colombia)
+summary(ols_col)
+
+```
+```{r}
+# --- Elasticidades Colombia ---
+taus <- seq(0.05, 0.95, by = 0.05)
+
+rq_models_col <- lapply(taus, function(t)
+  rq(log_mercado ~ log_total, tau = t, data = data_colombia))
+
+slopes_col <- sapply(rq_models_col, function(m) coef(m)[2])
+
+data_bogota <- data_colombia %>% filter(DOMINIO == "BOGOTÁ")
+
+rq_models_bog <- lapply(taus, function(t)
+  rq(log_mercado ~ log_total, tau = t, data = data_bogota))
+
+slopes_bog <- sapply(rq_models_bog, function(m) coef(m)[2])
+
+```
+
+
+
+```{r}
+taus2 <- c(0.10, 0.50, 0.90)
+rq3 <- lapply(taus2, function(t) rq(log_mercado ~ log_total, tau = t, data = data_colombia))
+
+xgrid <- seq(min(data_colombia$log_total), max(data_colombia$log_total), length = 200)
+y_hat <- sapply(rq3, function(m) coef(m)[1] + coef(m)[2] * xgrid)
+
+plot(data_colombia$log_total, data_colombia$log_mercado,
+pch = 16, col = rgb(0,0,0,0.12), cex = 0.6,
+xlab = "Log Gasto Total",
+ylab = "Log Gasto en Mercado",
+main = "Regresiones Cuantilicas (Colombia)")
+
+lines(xgrid, y_hat[,1], lty = 3, lwd = 2)
+lines(xgrid, y_hat[,2], lty = 1, lwd = 2)
+lines(xgrid, y_hat[,3], lty = 2, lwd = 2)
+
+legend("topleft",
+legend = c("q = 0.10", "q = 0.50", "q = 0.90"),
+lty = c(3,1,2), lwd = 2, col = "black")
+
+```
+La gráfica muestra las líneas de regresión cuantilica para los cuantiles 0.10, 0.50 y 0.90 del gasto en mercado, condicionado por el gasto total del hogar. Los resultados indican que la relación entre ambas variables no es constante, sino que varía a lo largo de la distribución del gasto en mercado.
+
+Cuantil 0.10: la pendiente es baja. Los hogares que gastan poco en mercado aumentan muy poco su consumo cuando aumenta su gasto total. Esto muestra baja elasticidad.
+
+Cuantil 0.50 (mediana): la pendiente es moderada. El hogar “típico” responde más que los hogares de bajos gastos, pero menos que los de mayores gastos.
+
+Cuantil 0.90: la pendiente es alta. Los hogares que más gastan en mercado son los que más incrementan su gasto cuando crece su gasto total. Esto refleja alta elasticidad.
+
+En conjunto, las tres líneas forman un patrón ascendente: a mayor nivel del cuantíl, mayor es la sensibilidad del gasto en mercado ante aumentos en el gasto total del hogar. Este patrón muestra que el modelo OLS, que estima una única pendiente promedio, pierde información importante, mientras que la regresión cuantilica revela la heterogeneidad del comportamiento de consumo entre distintos tipos de hogares.
+
+
+```{r}
+plot(taus, slopes_col, type = "l", lwd = 2, col = "black",
+xlab = "Cuantil", ylab = "Elasticidad",
+main = "Elasticidad del gasto en mercado vs cuantiles (Colombia)")
+
+```
+
+```{r}
+plot(taus, slopes_col, type = "l", lwd = 2, col = "black",
+     xlab = "Cuantil", ylab = "Pendiente (elasticidad)",
+     main = "Elasticidad gasto mercado vs cuantiles (Colombia)")
+
+lines(taus, upper, col = "gray70", lwd = 1, lty = 2)
+lines(taus, lower, col = "gray70", lwd = 1, lty = 2)
+
+abline(h = coef(ols_col)[2], lty = 3, lwd = 2, col = "darkgray")
+
+legend("topleft",
+       legend = c("Pendiente cuantil", "95% IC", "OLS"),
+       col = c("black", "gray70", "darkgray"),
+       lty = c(1,2,3), lwd = c(2,1,2))
+
+```
+La gráfica muestra cómo cambia la elasticidad del gasto en mercado respecto al gasto total del hogar a lo largo de distintos cuantiles. El patrón es claramente decreciente: los hogares con bajo gasto en mercado (cuantiles pequeños) tienen elasticidades más altas, mientras que los hogares con mayor gasto en mercado (cuantiles altos) presentan elasticidades más bajas.
+
+En concreto:
+
+Cuantiles bajos (0.05–0.20): elasticidades relativamente altas (0.6–0.8). Estos hogares aumentan su gasto en mercado de manera más sensible cuando su gasto total crece.
+
+Cuantiles medios (0.30–0.60): elasticidades alrededor de 0.45–0.55, cercanas al valor estimado por OLS.
+
+Cuantiles altos (0.70–0.95): elasticidades bajas (≈0.40). Los hogares que ya gastan mucho en mercado aumentan menos su gasto cuando sube su gasto total.
+
+En conjunto, esta evidencia muestra que la elasticidad del gasto en mercado no es constante: es mayor en hogares con consumos bajos y disminuye conforme aumenta el nivel de gasto. Esto implica que OLS subresume la heterogeneidad, ya que su pendiente promedio ignora estas diferencias entre grupos de hogares.
+
+```{r}
+taus2 <- c(0.10, 0.50, 0.90)
+rq3 <- lapply(taus2, function(t) rq(log_mercado ~ log_total, tau = t, data = data_colombia))
+
+xgrid <- seq(min(data_colombia$log_total), max(data_colombia$log_total), length = 200)
+y_hat <- sapply(rq3, function(m) coef(m)[1] + coef(m)[2] * xgrid)
+
+plot(data_colombia$log_total, data_colombia$log_mercado,
+     pch = 16, col = rgb(0,0,0,0.1), cex = 0.6,
+     xlab = "Log Gasto Total",
+     ylab = "Log Gasto Mercado",
+     main = "Regresiones Cuantilicas (Colombia)")
+
+lines(xgrid, y_hat[,1], lwd = 2, lty = 3)   # q = 0.10
+lines(xgrid, y_hat[,2], lwd = 2, lty = 1)   # q = 0.50
+lines(xgrid, y_hat[,3], lwd = 2, lty = 2)   # q = 0.90
+
+legend("topleft",
+       legend = c("q = 0.10", "q = 0.50 (mediana)", "q = 0.90"),
+       lty = c(3,1,2), lwd = 2, col = "black", bty = "n")
+
+```
+La gráfica muestra cómo varía la relación entre el gasto total del hogar y el gasto en mercado a lo largo de distintos cuantiles de la distribución del gasto en mercado. Las tres líneas revelan que la pendiente aumenta con el cuantil, lo que indica heterogeneidad en la elasticidad.
+
+q = 0.10 (punteada): la pendiente es relativamente baja, lo que sugiere que los hogares que gastan poco en mercado incrementan su gasto muy poco cuando aumenta su gasto total.
+
+q = 0.50 (línea sólida): el hogar típico muestra una elasticidad moderada.
+
+q = 0.90 (línea segmentada): los hogares que más gastan en mercado son los que más aumentan su gasto cuando crece su gasto total, lo que refleja mayor sensibilidad.
+
+En conjunto, las líneas forman un patrón ascendente: los hogares con mayor gasto en mercado muestran una elasticidad más alta. Esto confirma que el modelo OLS —que estima una única pendiente promedio— no captura correctamente la heterogeneidad en el comportamiento de consumo entre hogares colombianos.
+
+
+```{r}
+plot(taus, slopes_bog, type = "l", lwd = 3, col = "blue", lty = 2,
+xlab = "Cuantil", ylab = "Elasticidad",
+main = "Elasticidad del gasto en mercado (Bogotá vs Colombia)")
+
+lines(taus, slopes_col, lwd = 2, col = "black")
+
+legend("topright",
+legend = c("Bogotá", "Colombia"),
+col = c("blue","black"),
+lwd = c(3,2), lty = c(2,1))
+
+```
+La gráfica compara la elasticidad del gasto en mercado respecto al gasto total del hogar a lo largo de distintos cuantiles para Bogotá y para el agregado nacional.
+
+En ambos casos, la elasticidad es decreciente: los hogares ubicados en los cuantiles bajos muestran mayor sensibilidad del gasto en mercado ante incrementos del gasto total, mientras que esta sensibilidad disminuye progresivamente en los cuantiles más altos. Sin embargo, la comparación revela diferencias importantes entre Bogotá y el país:
+
+En Colombia, las elasticidades son mayores en los cuantiles bajos (alrededor de 0.75–0.85), reflejando que los hogares de menor gasto presentan una fuerte respuesta del gasto en mercado cuando aumenta su gasto total.
+
+En Bogotá, las elasticidades en los cuantiles bajos son sistemáticamente menores, lo que sugiere que los hogares con bajo gasto en la ciudad muestran una respuesta más moderada.
+
+A partir de cuantiles medios (q > 0.30), las dos curvas se acercan y mantienen valores similares, lo que indica que en niveles intermedios y altos de gasto, los patrones de consumo de Bogotá son comparables a los nacionales.
+
+En los cuantiles altos, ambas elasticidades convergen hacia valores alrededor de 0.40, mostrando que los hogares que ya gastan mucho en mercado presentan una sensibilidad baja y estable.
+
+En conjunto, Bogotá presenta un comportamiento más homogéneo y menos extremo, mientras que el agregado nacional muestra mayor variabilidad y elasticidades más altas en la base de la distribución. Esto sugiere que, fuera de Bogotá, los hogares de bajos ingresos dependen relativamente más del gasto en mercado ante cambios en su presupuesto total.
+
+Conclusiones
+
+La regresión cuantilica revela que la elasticidad del gasto en mercado no es constante: los hogares de bajos niveles de gasto presentan elasticidades altas, mientras que en los hogares de mayor gasto la elasticidad disminuye de forma marcada.
+
+El modelo OLS oculta esta heterogeneidad al proveer una sola pendiente promedio, lo que confirma la utilidad de la regresión cuantilica para describir patrones de consumo diferenciados dentro de la población.
+
+La comparación entre Bogotá y el agregado nacional muestra que Bogotá tiene elasticidades menores y más estables, mientras que a nivel nacional existe mayor variabilidad y una elasticidad inicial más alta, especialmente entre los hogares de menores gastos.
+
+Las curvas de Colombia revelan una estructura de consumo más heterogénea, lo que sugiere la presencia de diferencias regionales y socioeconómicas más pronunciadas fuera de la capital.
+
+Recomendaciones
+
+Utilizar modelos cuantilicos en estudios de consumo y bienestar, especialmente cuando se sospecha que el comportamiento difiere entre hogares de bajos y altos niveles de gasto.
+
+Evitar interpretar la elasticidad únicamente mediante OLS, ya que puede conducir a conclusiones incompletas o sesgadas.
+
+Profundizar el análisis segmentando por otras regiones o dominios, dado que los resultados muestran diferencias claras entre Bogotá y el resto del país.
+
+Complementar este tipo de análisis con variables explicativas adicionales (tamaño del hogar, educación, empleo), para identificar factores detrás de la heterogeneidad observada.
+
+Referencia
+Cameron, A. Colin, and Pravin K. Trivedi. 2005. Microeconometrics: Methods and Applications. Cambridge: Cambridge University Press.
+
